@@ -94,27 +94,32 @@ def main():
             logger.error(f"Error in SOH prediction: {str(e)}")
             metrics['soh'] = {'error': str(e)}
 
+        soh_predictor.save_model(config.MODELS_DIR / 'soh_model.pkl')
+
         # Capacity Prediction
         try:
-            capacity_predictor = CapacityPredictor(**config.CAPACITY_MODEL_PARAMS)
+            capacity_predictor = CapacityPredictor(config=config)
             metrics['capacity'] = capacity_predictor.train(X_capacity, y_capacity)
             logger.info(f"Capacity Prediction Metrics: {metrics['capacity']}")
         except Exception as e:
             logger.error(f"Error in capacity prediction: {str(e)}")
             metrics['capacity'] = {'error': str(e)}
+        capacity_predictor.save_model(config.MODELS_DIR / 'capacity_model.pkl')
 
         # Anomaly Detection
         try:
-            anomaly_detector = AnomalyDetector(**config.ANOMALY_DETECTOR_PARAMS)
-            # For anomaly detection, we use all features
-            anomalies = anomaly_detector.fit_predict(X_soh)  # Using SOH features for anomaly detection
+            anomaly_detector = AnomalyDetector(config=config)
+            anomaly_metrics = anomaly_detector.train(X_soh)    # Get metrics from training
+            anomalies = anomaly_detector.predict(X_soh)        # Get predictions
             anomaly_stats = anomaly_detector.analyze_anomalies(df_featured, anomalies)
             logger.info(f"Anomaly Detection Stats: {anomaly_stats}")
         except Exception as e:
             logger.error(f"Error in anomaly detection: {str(e)}")
-            anomalies = pd.Series([False] * len(df_featured))
+            anomalies = pd.Series([0] * len(df_featured))
             anomaly_stats = {'error': str(e)}
+        anomaly_detector.save_model(config.MODELS_DIR / 'anomaly_model.pkl')
 
+        
         # 5. Create visualizations
         logger.info("Creating visualizations...")
         visualizer = BatteryVisualizer()
