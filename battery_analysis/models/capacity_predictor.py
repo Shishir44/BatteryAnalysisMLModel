@@ -7,7 +7,7 @@ from .base_model import BaseModel
 from ..utils.config import Config
 from ..utils.logger import setup_logger
 
-# Initialize logger for this module
+# Initialize logger for this module and disable logging for sklearn
 logger = setup_logger(__name__)
 
 class CapacityPredictor(BaseModel):
@@ -28,6 +28,10 @@ class CapacityPredictor(BaseModel):
         """Train the capacity prediction model."""
         logger.info("Training capacity prediction model...")
         
+            # Handle NaN values
+        X = X.fillna(X.mean())
+        y = y.fillna(y.mean())
+        
         # Train model
         self.model.fit(X, y)
         
@@ -36,8 +40,8 @@ class CapacityPredictor(BaseModel):
         
         # Calculate metrics
         metrics = {
-            'rmse': np.sqrt(mean_squared_error(y, y_pred)),
-            'r2': r2_score(y, y_pred)
+            'rmse': float(np.sqrt(mean_squared_error(y, y_pred))),
+            'r2': float(r2_score(y, y_pred))
         }
         
         logger.info("Model training completed.")
