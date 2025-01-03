@@ -1,8 +1,10 @@
 import pandas as pd
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from ..utils.logger import setup_logger
 from ..utils.config import Config
+from scipy.stats import skew, kurtosis
+from scipy.signal import savgol_filter
 
 logger = setup_logger(__name__)
 
@@ -10,257 +12,220 @@ class FeatureEngineer:
     def __init__(self, config: Config):
         """
         Initialize the FeatureEngineer with configuration.
-        
-        Args:
-            config: Configuration object containing feature engineering parameters
         """
         self.config = config
         self.feature_columns = None
-    
-    def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        self.base_features = {
+            'voltage_features': [
+                'voltage_mean', 'voltage_std', 'voltage_max', 'voltage_min',
+                'voltage_stability', 'voltage_efficiency'
+            ],
+            'current_features': [
+                'current_mean', 'current_std', 'current_integral'
+            ],
+            'temperature_features': [
+                'temp_mean', 'temp_max', 'temp_std', 'temp_stress'
+            ],
+            'power_features': [
+                'power_efficiency', 'avg_power', 'max_power'
+            ],
+            'degradation_features': [
+                'capacity_degradation', 'SOH_degradation',
+                'capacity_degradation_rate', 'SOH_degradation_rate'
+            ]
+        }
+
+    def create_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
         """
-        Create engineered features for battery analysis.
+        Create advanced features from comprehensive battery data.
         
         Args:
             df: Input DataFrame with battery data
             
         Returns:
-            DataFrame with engineered features
+            DataFrame with additional engineered features and feature creation stats
         """
-        logger.info("Starting feature engineering...")
+        logger.info("Starting advanced feature engineering...")
         
         df_featured = df.copy()
+        stats = {'created_features': []}
         
         try:
-            # Validate required columns
-            self._validate_required_columns(df_featured)
+            # 1. Create trend features
+            df_featured = self._create_trend_features(df_featured)
+            stats['trend_features'] = self._get_feature_names('trend')
             
-            # Create cycle column if it doesn't exist
-            df_featured = self._ensure_cycle_column(df_featured)
+            # 2. Create interaction features
+            df_featured = self._create_interaction_features(df_featured)
+            stats['interaction_features'] = self._get_feature_names('interaction')
             
-            # Basic features
-            logger.info("Creating basic features...")
-            df_featured = self._create_basic_features(df_featured)
+            # 3. Create ratio features
+            df_featured = self._create_ratio_features(df_featured)
+            stats['ratio_features'] = self._get_feature_names('ratio')
             
-            # Time series features
-            logger.info("Creating time series features...")
-            df_featured = self._create_time_series_features(df_featured)
+            # 4. Create complexity features
+            df_featured = self._create_complexity_features(df_featured)
+            stats['complexity_features'] = self._get_feature_names('complexity')
             
-            # Statistical features
-            logger.info("Creating statistical features...")
-            df_featured = self._create_statistical_features(df_featured)
+            # 5. Create moving window features
+            df_featured = self._create_window_features(df_featured)
+            stats['window_features'] = self._get_feature_names('window')
             
-            # Advanced features
-            logger.info("Creating advanced features...")
-            df_featured = self._create_advanced_features(df_featured)
+            # Store all feature columns
+            self.feature_columns = list(set(df_featured.columns) - set(df.columns))
+            stats['total_new_features'] = len(self.feature_columns)
             
-            # Store feature columns for later use
-            self.feature_columns = [col for col in df_featured.columns if col not in df.columns]
-            
-            logger.info(f"Created {len(self.feature_columns)} new features")
+            logger.info(f"Created {stats['total_new_features']} new features")
+            return df_featured, stats
             
         except Exception as e:
             logger.error(f"Error in feature engineering: {str(e)}")
             raise
-            
-        return df_featured
-    
-    def _validate_required_columns(self, df: pd.DataFrame) -> None:
-        """Validate that required columns exist in the DataFrame."""
-        required_columns = [
-            'terminal_voltage', 'terminal_current', 'temperature',
-            'charge_voltage', 'charge_current', 'time', 'capacity', 'SOH'
-        ]
+
+    def _create_trend_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create trend-based features."""
+        # Calculate trends for key metrics
+        key_metrics = ['voltage_mean', 'current_mean', 'temp_mean', 'capacity', 'SOH']
         
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Missing required columns: {missing_columns}")
-    
-    def _ensure_cycle_column(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure cycle column exists, create it if it doesn't."""
-        if 'cycle' not in df.columns:
-            logger.info("'cycle' column not found, creating it from time series data...")
-            
-            # Sort by time to ensure proper cycle detection
-            df = df.sort_values('time')
-            
-            # Detect cycles based on time discontinuities
-            time_diff = df['time'].diff()
-            
-            # A new cycle starts when:
-            # 1. Time difference is negative (time resets)
-            # 2. Time difference is too large (gap between cycles)
-            # Use median time difference * 10 as threshold for large gaps
-            median_diff = time_diff.median()
-            cycle_starts = (time_diff < 0) | (time_diff > median_diff * 10)
-            
-            # Create cycle numbers
-            df['cycle'] = cycle_starts.cumsum()
-            
-            logger.info(f"Created {df['cycle'].nunique()} cycles")
+        for metric in key_metrics:
+            if metric in df.columns:
+                # Calculate smoothed values using Savitzky-Golay filter
+                smoothed = savgol_filter(df[metric], window_length=5, polyorder=2)
+                
+                # Calculate trend features
+                df[f'{metric}_trend'] = np.gradient(smoothed)
+                df[f'{metric}_acceleration'] = np.gradient(df[f'{metric}_trend'])
+                
+                # Calculate trend stability
+                df[f'{metric}_trend_stability'] = df[f'{metric}_trend'].rolling(
+                    window=5, min_periods=1
+                ).std()
         
-        return df
-    
-    def _create_basic_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create basic engineered features."""
-        try:
-            # Power features
-            df['power'] = df['terminal_voltage'] * df['terminal_current']
-            df['charge_power'] = df['charge_voltage'] * df['charge_current']
-            
-            # Efficiency features
-            df['voltage_efficiency'] = np.where(
-                df['charge_voltage'] != 0,
-                df['terminal_voltage'] / df['charge_voltage'],
-                0
-            )
-            df['current_efficiency'] = np.where(
-                df['charge_current'] != 0,
-                df['terminal_current'] / df['charge_current'],
-                0
-            )
-            
-            # Resistance features
-            df['internal_resistance'] = np.where(
-                df['terminal_current'] != 0,
-                (df['charge_voltage'] - df['terminal_voltage']) / df['terminal_current'],
-                0
-            )
-            
-            # Energy features
-            df['energy'] = df['power'] * df['time'].diff()
-            df['charge_energy'] = df['charge_power'] * df['time'].diff()
-            
-            # Overall efficiency
-            df['energy_efficiency'] = np.where(
-                df['charge_energy'] != 0,
-                df['energy'] / df['charge_energy'],
-                0
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in creating basic features: {str(e)}")
-            raise
-            
-        return df
-    
-    def _create_time_series_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create time series based features."""
-        try:
-            # Get window sizes from config
-            window_sizes = self.config.FEATURE_ENGINEERING.get('window_sizes', [5, 10, 20])
-            
-            # Key parameters to analyze
-            parameters = ['terminal_voltage', 'terminal_current', 'temperature', 
-                        'power', 'internal_resistance']
-            
-            for window in window_sizes:
-                for col in parameters:
-                    if col in df.columns:
-                        # Rolling statistics per cycle
-                        df[f'{col}_rolling_mean_{window}'] = df.groupby('cycle')[col].transform(
-                            lambda x: x.rolling(window=window, min_periods=1).mean()
-                        )
-                        df[f'{col}_rolling_std_{window}'] = df.groupby('cycle')[col].transform(
-                            lambda x: x.rolling(window=window, min_periods=1).std()
-                        )
-                        
-                        # Rate of change
-                        df[f'{col}_rate_{window}'] = df.groupby('cycle')[col].transform(
-                            lambda x: x.diff(window) / (window * x.index.to_series().diff(window))
-                        )
-            
-        except Exception as e:
-            logger.error(f"Error in creating time series features: {str(e)}")
-            raise
-            
-        return df
-    
-    def _create_statistical_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create statistical features."""
-        try:
-            # Verify cycle column exists and type
-            if 'cycle' not in df.columns:
-                raise ValueError("'cycle' column missing from DataFrame")
-            logger.debug(f"Cycle column dtype: {df['cycle'].dtype}")
-            
-            # Define aggregation functions
-            agg_funcs = {
-                'terminal_voltage': ['mean', 'std', 'max', 'min', 'skew'],
-                'terminal_current': ['mean', 'std', 'max', 'min', 'skew'],
-                'temperature': ['mean', 'std', 'max', 'min'],
-                'power': ['mean', 'max', 'sum'],
-                'internal_resistance': ['mean', 'std'],
-                'energy_efficiency': ['mean', 'std']
-            }
-            
-            # Verify all columns exist before aggregation
-            missing_cols = [col for col in agg_funcs.keys() if col not in df.columns]
-            if missing_cols:
-                raise ValueError(f"Missing columns for aggregation: {missing_cols}")
-            
-            # Cycle-level statistics
-            cycle_stats = df.groupby('cycle').agg(agg_funcs)
-            
-            # Debug information
-            logger.debug(f"Shape of cycle_stats before flatten: {cycle_stats.shape}")
-            logger.debug(f"Columns before flatten: {cycle_stats.columns.tolist()}")
-            
-            # Flatten column names
-            cycle_stats.columns = [f"{col[0]}_{col[1]}" for col in cycle_stats.columns]
-            cycle_stats = cycle_stats.reset_index()
-            
-            # Debug information
-            logger.debug(f"Shape of cycle_stats after flatten: {cycle_stats.shape}")
-            logger.debug(f"Columns after flatten: {cycle_stats.columns.tolist()}")
-            
-            # Merge back with original DataFrame
-            df = pd.merge(df, cycle_stats, on='cycle', how='left')
-            
-            # Verify merge results
-            logger.debug(f"Shape after merge: {df.shape}")
-            
-        except Exception as e:
-            logger.error(f"Error in creating statistical features: {str(e)}")
-            raise
-            
-        return df
-    
-    def _create_advanced_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create advanced engineered features."""
-        try:
-            # Capacity retention features
-            df['capacity_retention'] = df.groupby('cycle')['capacity'].transform(
-                lambda x: x / x.iloc[0] if len(x) > 0 else 1
-            )
-            
-            # SOH change rate
-            df['soh_change_rate'] = df.groupby('cycle')['SOH'].transform(
-                lambda x: x.diff() / x.shift(1)
-            )
-            
-            # Temperature stress indicator
-            temp_ranges = self.config.FEATURE_ENGINEERING.get('temp_ranges', [(0, 25), (25, 40), (40, 60)])
-            for i, (min_temp, max_temp) in enumerate(temp_ranges):
-                df[f'temp_range_{i}'] = ((df['temperature'] >= min_temp) & 
-                                       (df['temperature'] < max_temp)).astype(int)
-            
-            # Voltage stress features
-            df['voltage_stress'] = (df['terminal_voltage'] - df['terminal_voltage'].mean()) / df['terminal_voltage'].std()
-            
-            # Cycle progress
-            df['cycle_progress'] = df.groupby('cycle')['time'].transform(
-                lambda x: (x - x.min()) / (x.max() - x.min()) if len(x) > 1 else 0
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in creating advanced features: {str(e)}")
-            raise
-            
         return df
 
+    def _create_interaction_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create interaction features between different metrics."""
+        # Define important feature pairs for interaction
+        interaction_pairs = [
+            ('voltage_efficiency', 'temp_stress'),
+            ('current_integral', 'temp_max'),
+            ('power_efficiency', 'voltage_stability'),
+            ('capacity_degradation_rate', 'temp_stress')
+        ]
+        
+        for feat1, feat2 in interaction_pairs:
+            if feat1 in df.columns and feat2 in df.columns:
+                # Multiplication interaction
+                df[f'{feat1}_{feat2}_interaction'] = df[feat1] * df[feat2]
+                
+                # Ratio interaction (avoiding division by zero)
+                df[f'{feat1}_{feat2}_ratio'] = df[feat1] / df[feat2].replace(0, np.nan)
+                
+                # Sum interaction
+                df[f'{feat1}_{feat2}_sum'] = df[feat1] + df[feat2]
+        
+        return df
+
+    def _create_ratio_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create ratio-based features."""
+        if all(col in df.columns for col in ['voltage_max', 'voltage_min']):
+            df['voltage_range_ratio'] = df['voltage_max'] / df['voltage_min'].replace(0, np.nan)
+        
+        if all(col in df.columns for col in ['temp_max', 'temp_mean']):
+            df['temp_deviation_ratio'] = df['temp_max'] / df['temp_mean'].replace(0, np.nan)
+        
+        if all(col in df.columns for col in ['power_efficiency', 'voltage_efficiency']):
+            df['efficiency_ratio'] = (
+                df['power_efficiency'] / df['voltage_efficiency'].replace(0, np.nan)
+            )
+        
+        # Normalize ratios to [0,1] range
+        ratio_features = [col for col in df.columns if 'ratio' in col]
+        for feat in ratio_features:
+            df[feat] = df[feat].clip(lower=0, upper=df[feat].quantile(0.99))
+            df[feat] = (df[feat] - df[feat].min()) / (df[feat].max() - df[feat].min())
+        
+        return df
+
+    def _create_complexity_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create complexity-based features."""
+        for group, features in self.base_features.items():
+            group_features = [f for f in features if f in df.columns]
+            if group_features:
+                # Calculate group complexity features
+                group_values = df[group_features]
+                
+                # Entropy-based complexity
+                df[f'{group}_entropy'] = -(group_values * np.log2(
+                    np.abs(group_values.replace(0, 1))
+                )).sum(axis=1)
+                
+                # Statistical complexity
+                df[f'{group}_complexity'] = np.sqrt(
+                    (group_values ** 2).sum(axis=1) / len(group_features)
+                )
+                
+                # Feature correlation
+                df[f'{group}_correlation'] = group_values.corr().mean().mean()
+        
+        return df
+
+    def _create_window_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create moving window features."""
+        # Define windows for different timeframes
+        windows = [3, 5, 10]
+        
+        key_metrics = [
+            'voltage_stability', 'temp_stress', 'power_efficiency',
+            'capacity_degradation_rate', 'SOH_degradation_rate'
+        ]
+        
+        for metric in key_metrics:
+            if metric in df.columns:
+                for window in windows:
+                    # Rolling statistics
+                    df[f'{metric}_roll_mean_{window}'] = df[metric].rolling(
+                        window=window, min_periods=1
+                    ).mean()
+                    
+                    df[f'{metric}_roll_std_{window}'] = df[metric].rolling(
+                        window=window, min_periods=1
+                    ).std()
+                    
+                    # Rate of change
+                    df[f'{metric}_roll_rate_{window}'] = df[metric].diff(window) / window
+        
+        return df
+
+    def _get_feature_names(self, feature_type: str) -> List[str]:
+        """Get list of features of a specific type."""
+        if not self.feature_columns:
+            return []
+        
+        return [
+            col for col in self.feature_columns 
+            if any(type_indicator in col for type_indicator in [
+                f'_{feature_type}', f'{feature_type}_'
+            ])
+        ]
+
     def get_feature_names(self) -> List[str]:
-        """Return the list of engineered feature names."""
+        """Return the list of all engineered feature names."""
         if self.feature_columns is None:
             raise ValueError("No features have been created yet. Run create_features first.")
         return self.feature_columns
+
+    def get_feature_importance_groups(self) -> Dict[str, List[str]]:
+        """Get features grouped by their type for importance analysis."""
+        if not self.feature_columns:
+            return {}
+            
+        feature_groups = {
+            'trend_features': self._get_feature_names('trend'),
+            'interaction_features': self._get_feature_names('interaction'),
+            'ratio_features': self._get_feature_names('ratio'),
+            'complexity_features': self._get_feature_names('complexity'),
+            'window_features': self._get_feature_names('window')
+        }
+        
+        return {k: v for k, v in feature_groups.items() if v}
